@@ -4062,7 +4062,7 @@ namespace System.Management.Automation
     /// It is permitted to subclass <see cref="ReadOnlyPSMemberInfoCollection&lt;T&gt;"/>
     /// but there is no established scenario for doing this, nor has it been tested.
     /// </remarks>
-    public class ReadOnlyPSMemberInfoCollection<T> : IEnumerable<T> where T : PSMemberInfo
+    public class ReadOnlyPSMemberInfoCollection<T> : IReadOnlyList<T> where T : PSMemberInfo
     {
         private PSMemberInfoInternalCollection<T> _members;
 

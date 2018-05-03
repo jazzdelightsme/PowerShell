@@ -1540,6 +1540,13 @@ namespace Microsoft.PowerShell.Commands
             }
         }
 
+
+        private CallSite<Func<CallSite, object, object>> _getValueDynamicSite;
+
+        private string _wildcardLastResolvedPropertyName;
+        private CallSite<Func<CallSite, object, object>> _getValueDynamicSite_wildcard;
+
+
         /// <summary>
         /// Get the value based on the given property name
         /// </summary>
@@ -1579,7 +1586,27 @@ namespace Microsoft.PowerShell.Commands
                 // has keys that can't be compared to property.
             }
 
-            ReadOnlyPSMemberInfoCollection<PSMemberInfo> members = GetMatchMembers();
+            if ((_getValueDynamicSite == null) &&
+                !WildcardPattern.ContainsWildcardCharacters(_property))
+            {
+                _getValueDynamicSite =
+                    CallSite<Func<CallSite, object, object>>.Create(
+                            PSGetMemberBinder.Get(
+                                _property,
+                                classScope: (Type) null,
+                                @static: false));
+            }
+
+            if (_getValueDynamicSite != null)
+            {
+                return GetValueViaDynamicSite(_getValueDynamicSite);
+            }
+
+            Dbg.Assert(
+                WildcardPattern.ContainsWildcardCharacters(_property),
+                "should have wildcards to get here");
+
+            IReadOnlyList<PSMemberInfo> members = GetMatchMembers();
             if (members.Count > 1)
             {
                 StringBuilder possibleMatches = new StringBuilder();
@@ -1608,45 +1635,60 @@ namespace Microsoft.PowerShell.Commands
             }
             else
             {
-                try
+                // If wildcards are involved, the resolved property name could potentially
+                // be different on every object... but probably not, so we'll attempt to
+                // cache the callsite.
+
+                string resolvedPropName = members[0].Name;
+
+                if (resolvedPropName.Equals(_wildcardLastResolvedPropertyName, StringComparison.OrdinalIgnoreCase))
                 {
-                    return members[0].Value;
+                    Dbg.Assert(_getValueDynamicSite_wildcard != null, "should have created this last time through");
                 }
-                catch (TerminateException)
+                else
                 {
-                    throw;
+                    _wildcardLastResolvedPropertyName = resolvedPropName;
+                    _getValueDynamicSite_wildcard = CallSite<Func<CallSite, object, object>>.Create(
+                            PSGetMemberBinder.Get(
+                                resolvedPropName,
+                                classScope: (Type) null,
+                                @static: false));
                 }
-                catch (MethodException)
-                {
-                    throw;
-                }
-                catch (Exception)
-                {
-                    // When the property is not gettable or it throws an exception
-                    return null;
-                }
+
+                return GetValueViaDynamicSite(_getValueDynamicSite_wildcard);
             }
 
             return null;
+        }
+
+
+        private object GetValueViaDynamicSite(CallSite<Func<CallSite, object, object>> getValDynamicSite)
+        {
+            try
+            {
+                return getValDynamicSite.Target.Invoke(getValDynamicSite, InputObject);
+            }
+            catch (TerminateException)
+            {
+                throw;
+            }
+            catch (MethodException)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                // When the property is not gettable or it throws an exception
+                return null;
+            }
         }
 
         /// <summary>
         /// Get the matched PSMembers
         /// </summary>
         /// <returns></returns>
-        private ReadOnlyPSMemberInfoCollection<PSMemberInfo> GetMatchMembers()
+        private IReadOnlyList<PSMemberInfo> GetMatchMembers()
         {
-            if (!WildcardPattern.ContainsWildcardCharacters(_property))
-            {
-                PSMemberInfoInternalCollection<PSMemberInfo> results = new PSMemberInfoInternalCollection<PSMemberInfo>();
-                PSMemberInfo member = _inputObject.Members[_property];
-                if (member != null)
-                {
-                    results.Add(member);
-                }
-                return new ReadOnlyPSMemberInfoCollection<PSMemberInfo>(results);
-            }
-
             ReadOnlyPSMemberInfoCollection<PSMemberInfo> members = _inputObject.Members.Match(_property, PSMemberTypes.All);
             Dbg.Assert(members != null, "The return value of Members.Match should never be null.");
             return members;
