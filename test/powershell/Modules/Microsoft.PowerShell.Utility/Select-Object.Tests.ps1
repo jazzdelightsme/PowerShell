@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 . (Join-Path -Path $PSScriptRoot -ChildPath Test-Mocks.ps1)
+. (Join-Path -Path $PSScriptRoot -ChildPath ..\..\Add-TestDynamicType.ps1)
 
 Describe "Select-Object" -Tags "CI" {
     BeforeEach {
@@ -242,6 +243,22 @@ Describe "Select-Object DRT basic functionality" -Tags "CI" {
 		$results.Count | Should -Be 1
 		$results[0] | Should -BeExactly "3"
 	}
+
+    It "Select-Object should handle dynamic (DLR) properties"{
+        $dynObj = [TestDynamic]::new()
+        $results = $dynObj, $dynObj | Select-Object -ExpandProperty FooProp
+        $results.Count | Should -Be 2
+        $results[0] | Should -Be 123
+        $results[1] | Should -Be 123
+    }
+
+    It "Select-Object should handle wildcarded dynamic (DLR) properties when hinted by GetDynamicMemberNames"{
+        $dynObj = [TestDynamic]::new()
+        $results = $dynObj, $dynObj | Select-Object -ExpandProperty Foo*
+        $results.Count | Should -Be 2
+        $results[0] | Should -Be 123
+        $results[1] | Should -Be 123
+    }
 }
 
 Describe "Select-Object with Property = '*'" -Tags "CI" {

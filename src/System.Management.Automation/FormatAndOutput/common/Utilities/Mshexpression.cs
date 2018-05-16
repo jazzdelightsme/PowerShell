@@ -259,25 +259,16 @@ namespace Microsoft.PowerShell.Commands.Internal.Format
                 }
                 else
                 {
-                    PSMemberInfo member = target.Properties[_stringValue];
-                    if ((member == null) &&
-                        (target.BaseObject is System.Dynamic.IDynamicMetaObjectProvider))
+                    if (_getValueDynamicSite == null)
                     {
-                        if (_getValueDynamicSite == null)
-                        {
-                            _getValueDynamicSite =
-                                CallSite<Func<CallSite, object, object>>.Create(
-                                        PSGetMemberBinder.Get(
-                                            _stringValue,
-                                            classScope: (Type) null,
-                                            @static: false));
-                        }
-                        result = _getValueDynamicSite.Target.Invoke( _getValueDynamicSite, target.BaseObject);
+                        _getValueDynamicSite =
+                            CallSite<Func<CallSite, object, object>>.Create(
+                                    PSGetMemberBinder.Get(
+                                        _stringValue,
+                                        classScope: (Type) null,
+                                        @static: false));
                     }
-                    else
-                    {
-                        result = member.Value;
-                    }
+                    result = _getValueDynamicSite.Target.Invoke(_getValueDynamicSite, target);
                 }
 
                 return new MshExpressionResult(result, this, null);
