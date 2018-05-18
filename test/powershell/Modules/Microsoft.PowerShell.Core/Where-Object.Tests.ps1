@@ -128,11 +128,16 @@ Describe "Where-Object" -Tags "CI" {
     }
 
     It 'Where-Object should handle dynamic (DLR) objects' {
-        $Result = $Computers | Where-Object ComputerName -match '^MGC.+'
-        $Result.Count | Should -Be 1
-
         $dynObj = [TestDynamic]::new()
         $Result = $dynObj, $dynObj | Where FooProp -eq 123
+        $Result.Count | Should -Be 2
+        $Result[0] | Should -Be $dynObj
+        $Result[1] | Should -Be $dynObj
+    }
+
+    It 'Where-Object should handle dynamic (DLR) objects, even without property name hint' {
+        $dynObj = [TestDynamic]::new()
+        $Result = $dynObj, $dynObj | Where HiddenProp -eq 789
         $Result.Count | Should -Be 2
         $Result[0] | Should -Be $dynObj
         $Result[1] | Should -Be $dynObj

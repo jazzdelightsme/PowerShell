@@ -23,6 +23,11 @@ public class TestDynamic : DynamicObject
             result = 456;
             return true;
         }
+        else if (binder.Name == "HiddenProp") // Not presented in GetDynamicMemberNames
+        {
+            result = 789;
+            return true;
+        }
 
         result = null;
         return false;

@@ -252,6 +252,14 @@ Describe "Select-Object DRT basic functionality" -Tags "CI" {
         $results[1] | Should -Be 123
     }
 
+    It "Select-Object should handle dynamic (DLR) properties without GetDynamicMemberNames hint"{
+        $dynObj = [TestDynamic]::new()
+        $results = $dynObj, $dynObj | Select-Object -ExpandProperty HiddenProp
+        $results.Count | Should -Be 2
+        $results[0] | Should -Be 789
+        $results[1] | Should -Be 789
+    }
+
     It "Select-Object should handle wildcarded dynamic (DLR) properties when hinted by GetDynamicMemberNames"{
         $dynObj = [TestDynamic]::new()
         $results = $dynObj, $dynObj | Select-Object -ExpandProperty Foo*
