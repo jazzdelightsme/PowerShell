@@ -18,152 +18,37 @@ using Dbg = System.Management.Automation.Diagnostics;
 
 namespace Microsoft.PowerShell.Commands
 {
+    /// <summary>
+    /// A thin wrapper over a property-getting Callsite, to allow reuse when possible.
+    /// </summary>
     class DynamicPropertyGetter
     {
-        private string _propertyName;
-
         private CallSite<Func<CallSite, object, object>> _getValueDynamicSite;
 
         // For the wildcard case, lets us know if we can reuse the callsite:
-        private string _wildcardLastResolvedPropertyName;
+        private string _lastUsedPropertyName;
 
-        public DynamicPropertyGetter(string propertyName)
+        public object GetValue(PSObject inputObject, string propertyName)
         {
-            _propertyName = propertyName;
-        }
+            Dbg.Assert(!WildcardPattern.ContainsWildcardCharacters(propertyName), "propertyName should be pre-resolved by caller");
 
-        // N.B. NotFound must be the default value, so that the implicit parameterless
-        // constructor for the Result struct corresponds to a "not found" result.
-        public enum Status { NotFound = 0, AmbiguousMatch, Exception, OK };
-
-        public struct Result
-        {
-            public readonly Status Status;
-            public readonly object Value;
-            public readonly Exception Exception;
-            public readonly string PossibleMatches;
-
-            public Result(object value)
-            {
-                Status = Status.OK;
-                Value = value;
-                Exception = null;
-                PossibleMatches = null;
-            }
-
-            public Result(Exception ex)
-            {
-                Status = Status.Exception;
-                Value = null;
-                Exception = ex;
-                PossibleMatches = null;
-            }
-
-            public Result(string possibleMatches)
-            {
-                Status = Status.AmbiguousMatch;
-                Value = null;
-                Exception = null;
-                PossibleMatches = possibleMatches;
-            }
-
-            // N.B. The default (parameterless) constructor (which cannot be explicitly
-            // specified for structs) must correspond to a "NotFound" result.
-        }
-
-        public Result TryGetValue(PSObject inputObject)
-        {
-            if (!WildcardPattern.ContainsWildcardCharacters(_propertyName))
-            {
-                if (_getValueDynamicSite == null)
-                {
-                    _getValueDynamicSite = CallSite<Func<CallSite, object, object>>.Create(
-                            PSGetMemberBinder.Get(
-                                _propertyName,
-                                classScope: (Type) null,
-                                @static: false));
-                }
-            }
-            else
-            {
-                IReadOnlyList<PSMemberInfo> members = inputObject.Members.Match(_propertyName, PSMemberTypes.All);
-
-                if (members.Count > 1)
-                {
-                    // AmbiguousMatch result:
-                    return new Result(" " + String.Join(" ", members.Select( (x) => x.Name )));
-                }
-                else if (members.Count == 0)
-                {
-                    // NotFound result:
-                    return new Result();
-                }
-                else
-                {
-                    CacheResolvedName(members[0].Name);
-                }
-            }
-
-            return TryGetValueViaDynamicSite(_getValueDynamicSite, inputObject);
-        }
-
-        public Result TryGetValueWithPreResolvedName(PSObject inputObject, string resolvedName)
-        {
-            CacheResolvedName(resolvedName);
-
-            return TryGetValueViaDynamicSite(_getValueDynamicSite, inputObject);
-        }
-
-        private void CacheResolvedName(string resolvedName)
-        {
             // If wildcards are involved, the resolved property name could potentially
             // be different on every object... but probably not, so we'll attempt to
             // reuse the callsite if possible.
 
-            if (!resolvedName.Equals(_wildcardLastResolvedPropertyName, StringComparison.OrdinalIgnoreCase))
+            if (!propertyName.Equals(_lastUsedPropertyName, StringComparison.OrdinalIgnoreCase))
             {
-                _wildcardLastResolvedPropertyName = resolvedName;
+                _lastUsedPropertyName = propertyName;
                 _getValueDynamicSite = CallSite<Func<CallSite, object, object>>.Create(
                         PSGetMemberBinder.Get(
-                            resolvedName,
+                            propertyName,
                             classScope: (Type) null,
                             @static: false));
             }
-        }
 
-        private Result TryGetValueViaDynamicSite(
-                CallSite<Func<CallSite, object, object>> getValDynamicSite,
-                object inputObject)
-        {
-            object value = null;
-
-            try
-            {
-                value = getValDynamicSite.Target.Invoke(getValDynamicSite, inputObject);
-            }
-            catch (TerminateException)
-            {
-                throw;
-            }
-            catch (MethodException)
-            {
-                throw;
-            }
-            catch (PipelineStoppedException)
-            {
-                // PipelineStoppedException can be caused by select-object
-                throw;
-            }
-            catch (Exception e)
-            {
-                // When the property is not gettable or otherwise throws an exception
-                return new Result(e);
-            }
-
-            return new Result(value);
+            return _getValueDynamicSite.Target.Invoke(_getValueDynamicSite, inputObject);
         }
     }
-
 
     #region Built-in cmdlets that are used by or require direct access to the engine.
 
@@ -501,144 +386,141 @@ namespace Microsoft.PowerShell.Commands
                             member = _inputObject.Members[_propertyOrMethodName];
                         }
 
-
-                        if (member == null)
+                        // member is a method
+                        if ((member != null) && (member is PSMethodInfo))
                         {
-                            if ((_inputObject.BaseObject is IDynamicMetaObjectProvider) &&
-                                !WildcardPattern.ContainsWildcardCharacters(_propertyOrMethodName))
+                            // first we check if the member is a ParameterizedProperty
+                            PSParameterizedProperty targetParameterizedProperty = member as PSParameterizedProperty;
+                            if (targetParameterizedProperty != null)
                             {
-                                // Let's try a dynamic property access. Note that if it
-                                // comes to depending on dynamic access, we are assuming
-                                // it is a property; we don't have ETS info to tell us up
-                                // front if it is a method.
-
                                 // should process
                                 string propertyAction = String.Format(CultureInfo.InvariantCulture,
-                                    InternalCommandStrings.ForEachObjectPropertyAction, _propertyOrMethodName);
+                                    InternalCommandStrings.ForEachObjectPropertyAction, targetParameterizedProperty.Name);
 
+                                // ParameterizedProperty always take parameters, so we output the member.Value directly
                                 if (ShouldProcess(_targetString, propertyAction))
                                 {
-                                    if (_propGetter == null)
-                                    {
-                                        _propGetter = new DynamicPropertyGetter(_propertyOrMethodName);
-                                    }
+                                    WriteObject(member.Value);
+                                }
+                                return;
+                            }
 
-                                    var result = _propGetter.TryGetValue(_inputObject);
-                                    switch (result.Status)
+                            PSMethodInfo targetMethod = member as PSMethodInfo;
+                            Dbg.Assert(targetMethod != null, "targetMethod should not be null here.");
+                            try
+                            {
+                                // should process
+                                string methodAction = String.Format(CultureInfo.InvariantCulture,
+                                    InternalCommandStrings.ForEachObjectMethodActionWithoutArguments, targetMethod.Name);
+
+                                if (ShouldProcess(_targetString, methodAction))
+                                {
+                                    if (!BlockMethodInLanguageMode(InputObject))
                                     {
-                                        case DynamicPropertyGetter.Status.OK:
-                                            WriteToPipelineWithUnrolling(result.Value);
-                                            break;
-                                        case DynamicPropertyGetter.Status.Exception:
-                                            errorRecord = new ErrorRecord(result.Exception,
-                                                                          "DynamicPropertyAttemptFailed",
-                                                                          ErrorCategory.InvalidArgument,
-                                                                          _inputObject);
-                                            break;
-                                        case DynamicPropertyGetter.Status.NotFound:
-                                        case DynamicPropertyGetter.Status.AmbiguousMatch:
-                                            Dbg.Assert(false, "wildcard resolution should have already been done");
-                                            break;
-                                        default:
-                                            Dbg.Assert(false, "all possible statuses should be accounted for");
-                                            break;
+                                        object result = targetMethod.Invoke(Utils.EmptyArray<object>());
+                                        WriteToPipelineWithUnrolling(result);
                                     }
                                 }
                             }
-                            else
+                            catch (PipelineStoppedException)
                             {
-                                errorRecord = GenerateNameParameterError("Name", InternalCommandStrings.PropertyOrMethodNotFound,
-                                                                         "PropertyOrMethodNotFound", _inputObject,
-                                                                         _propertyOrMethodName);
+                                // PipelineStoppedException can be caused by select-object
+                                throw;
+                            }
+                            catch (Exception ex)
+                            {
+                                MethodException mex = ex as MethodException;
+                                if (mex != null && mex.ErrorRecord != null && mex.ErrorRecord.FullyQualifiedErrorId == "MethodCountCouldNotFindBest")
+                                {
+                                    WriteObject(targetMethod.Value);
+                                }
+                                else
+                                {
+                                    WriteError(new ErrorRecord(ex, "MethodInvocationError", ErrorCategory.InvalidOperation, _inputObject));
+                                }
                             }
                         }
                         else
                         {
-                            // member is a method
-                            if (member is PSMethodInfo)
+                            string resolvedPropertyName = null;
+                            bool isBlindDynamicAccess = false;
+                            if (member == null)
                             {
-                                // first we check if the member is a ParameterizedProperty
-                                PSParameterizedProperty targetParameterizedProperty = member as PSParameterizedProperty;
-                                if (targetParameterizedProperty != null)
+                                if ((_inputObject.BaseObject is IDynamicMetaObjectProvider) &&
+                                    !WildcardPattern.ContainsWildcardCharacters(_propertyOrMethodName))
                                 {
-                                    // should process
-                                    string propertyAction = String.Format(CultureInfo.InvariantCulture,
-                                        InternalCommandStrings.ForEachObjectPropertyAction, targetParameterizedProperty.Name);
+                                    // Let's just try a dynamic property access. Note that
+                                    // if it comes to depending on dynamic access, we are
+                                    // assuming it is a property; we don't have ETS info
+                                    // to tell us up front if it even exists or not, let
+                                    // alone if it is a method or something else.
 
-                                    // ParameterizedProperty always take parameters, so we output the member.Value directly
-                                    if (ShouldProcess(_targetString, propertyAction))
-                                    {
-                                        WriteObject(member.Value);
-                                    }
-                                    return;
+                                    resolvedPropertyName = _propertyOrMethodName;
+                                    isBlindDynamicAccess = true;
                                 }
-
-                                PSMethodInfo targetMethod = member as PSMethodInfo;
-                                Dbg.Assert(targetMethod != null, "targetMethod should not be null here.");
-                                try
+                                else
                                 {
-                                    // should process
-                                    string methodAction = String.Format(CultureInfo.InvariantCulture,
-                                        InternalCommandStrings.ForEachObjectMethodActionWithoutArguments, targetMethod.Name);
-
-                                    if (ShouldProcess(_targetString, methodAction))
-                                    {
-                                        if (!BlockMethodInLanguageMode(InputObject))
-                                        {
-                                            object result = targetMethod.Invoke(Utils.EmptyArray<object>());
-                                            WriteToPipelineWithUnrolling(result);
-                                        }
-                                    }
-                                }
-                                catch (PipelineStoppedException)
-                                {
-                                    // PipelineStoppedException can be caused by select-object
-                                    throw;
-                                }
-                                catch (Exception ex)
-                                {
-                                    MethodException mex = ex as MethodException;
-                                    if (mex != null && mex.ErrorRecord != null && mex.ErrorRecord.FullyQualifiedErrorId == "MethodCountCouldNotFindBest")
-                                    {
-                                        WriteObject(targetMethod.Value);
-                                    }
-                                    else
-                                    {
-                                        WriteError(new ErrorRecord(ex, "MethodInvocationError", ErrorCategory.InvalidOperation, _inputObject));
-                                    }
+                                    errorRecord = GenerateNameParameterError("Name", InternalCommandStrings.PropertyOrMethodNotFound,
+                                                                             "PropertyOrMethodNotFound", _inputObject,
+                                                                             _propertyOrMethodName);
                                 }
                             }
-                            // member is a property
                             else
+                            {
+                                // member is [presumably] a property
+                                resolvedPropertyName = member.Name;
+                            }
+
+                            if (!String.IsNullOrEmpty(resolvedPropertyName))
                             {
                                 // should process
                                 string propertyAction = String.Format(CultureInfo.InvariantCulture,
-                                    InternalCommandStrings.ForEachObjectPropertyAction, member.Name);
+                                    InternalCommandStrings.ForEachObjectPropertyAction, resolvedPropertyName);
 
                                 if (ShouldProcess(_targetString, propertyAction))
                                 {
                                     if (_propGetter == null)
                                     {
-                                        _propGetter = new DynamicPropertyGetter(_propertyOrMethodName);
+                                        _propGetter = new DynamicPropertyGetter();
                                     }
 
-                                    var result = _propGetter.TryGetValueWithPreResolvedName(InputObject, member.Name);
-                                    if (result.Status == DynamicPropertyGetter.Status.OK)
+                                    try
                                     {
-                                        WriteToPipelineWithUnrolling(result.Value);
+                                        WriteToPipelineWithUnrolling(_propGetter.GetValue(InputObject, resolvedPropertyName));
                                     }
-                                    else
+                                    catch (TerminateException) // The debugger is terminating the execution
                                     {
-                                        Dbg.Assert(result.Status == DynamicPropertyGetter.Status.Exception, "other possibilities cannot happen since we pre-resolved the name");
-
-                                        // When the property is not gettable or it throws an exception.
-                                        // e.g. when trying to access an assembly's location property, since dynamic assemblies are not backed up by a file,
-                                        // an exception will be thrown when accessing its location property. In this case, return null.
-                                        WriteObject(null);
+                                        throw;
+                                    }
+                                    catch (MethodException)
+                                    {
+                                        throw;
+                                    }
+                                    catch (PipelineStoppedException)
+                                    {
+                                        // PipelineStoppedException can be caused by select-object
+                                        throw;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        if (isBlindDynamicAccess)
+                                        {
+                                            errorRecord = new ErrorRecord(ex,
+                                                                          "DynamicPropertyAccessFailed_" + _propertyOrMethodName,
+                                                                          ErrorCategory.InvalidOperation,
+                                                                          InputObject);
+                                        }
+                                        else
+                                        {
+                                            // When the property is not gettable or it throws an exception.
+                                            // e.g. when trying to access an assembly's location property, since dynamic assemblies are not backed up by a file,
+                                            // an exception will be thrown when accessing its location property. In this case, return null.
+                                            WriteObject(null);
+                                        }
                                     }
                                 }
-                            } // end of member is a property
-                        } // member is not null
+                            } // end of resolvedPropertyName != null
+                        } // end of member is a [presumed] property
                     } // no args provided
 
                     if (errorRecord != null)
@@ -1732,7 +1614,6 @@ namespace Microsoft.PowerShell.Commands
             }
         }
 
-
         /// <summary>
         /// Get the value based on the given property name
         /// </summary>
@@ -1774,44 +1655,111 @@ namespace Microsoft.PowerShell.Commands
 
             if (_propGetter == null)
             {
-                _propGetter = new DynamicPropertyGetter(_property);
+                _propGetter = new DynamicPropertyGetter();
             }
 
-            DynamicPropertyGetter.Result result = _propGetter.TryGetValue(_inputObject);
+            string resolvedPropertyName = null;
+            bool isBlindDynamicAccess = false;
 
-            switch (result.Status)
+            ReadOnlyPSMemberInfoCollection<PSMemberInfo> members = GetMatchMembers();
+            if (members.Count > 1)
             {
-                case DynamicPropertyGetter.Status.AmbiguousMatch:
-                    WriteError(
-                        ForEachObjectCommand.
-                            GenerateNameParameterError("Property",
-                                                       InternalCommandStrings.AmbiguousPropertyOrMethodName,
-                                                       "AmbiguousPropertyName",
-                                                       _inputObject,
-                                                       _property,
-                                                       result.PossibleMatches));
-                    error = true;
-                    break;
+                StringBuilder possibleMatches = new StringBuilder();
+                foreach (PSMemberInfo item in members)
+                {
+                    possibleMatches.AppendFormat(CultureInfo.InvariantCulture, " {0}", item.Name);
+                }
 
-                case DynamicPropertyGetter.Status.NotFound:
-                    if (Context.IsStrictVersion(2))
+                WriteError(
+                    ForEachObjectCommand.
+                        GenerateNameParameterError("Property",
+                                                   InternalCommandStrings.AmbiguousPropertyOrMethodName,
+                                                   "AmbiguousPropertyName", _inputObject,
+                                                   _property, possibleMatches));
+                error = true;
+            }
+            else if (members.Count == 0)
+            {
+                if ((InputObject.BaseObject is IDynamicMetaObjectProvider) &&
+                    !WildcardPattern.ContainsWildcardCharacters(_property))
+                {
+                    // Let's just try a dynamic property access. Note that if it comes to
+                    // depending on dynamic access, we are assuming it is a property; we
+                    // don't have ETS info to tell us up front if it even exists or not,
+                    // let alone if it is a method or something else.
+
+                    resolvedPropertyName = _property;
+                    isBlindDynamicAccess = true;
+                }
+                else if (Context.IsStrictVersion(2))
+                {
+                    WriteError(ForEachObjectCommand.GenerateNameParameterError("Property",
+                                                                               InternalCommandStrings.PropertyNotFound,
+                                                                               "PropertyNotFound", _inputObject, _property));
+                    error = true;
+                }
+            }
+            else
+            {
+                resolvedPropertyName = members[0].Name;
+            }
+
+            if (!String.IsNullOrEmpty(resolvedPropertyName))
+            {
+                try
+                {
+                    return _propGetter.GetValue(_inputObject, resolvedPropertyName);
+                }
+                catch (TerminateException)
+                {
+                    throw;
+                }
+                catch (MethodException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    if (isBlindDynamicAccess && Context.IsStrictVersion(2))
                     {
-                        WriteError(ForEachObjectCommand.GenerateNameParameterError("Property",
-                                                                                   InternalCommandStrings.PropertyNotFound,
-                                                                                   "PropertyNotFound",
-                                                                                   _inputObject,
-                                                                                   _property));
+                        WriteError(new ErrorRecord(ex,
+                                                   "DynamicPropertyAccessFailed_" + _property,
+                                                   ErrorCategory.InvalidOperation,
+                                                   _inputObject));
+
                         error = true;
                     }
-                    break;
-
-                case DynamicPropertyGetter.Status.OK:
-                case DynamicPropertyGetter.Status.Exception:
-                    // We just ignore errors.
-                    break;
+                    else
+                    {
+                        // When the property is not gettable or it throws an exception
+                        return null;
+                    }
+                }
             }
 
-            return result.Value;
+            return null;
+        }
+
+        /// <summary>
+        /// Get the matched PSMembers
+        /// </summary>
+        /// <returns></returns>
+        private ReadOnlyPSMemberInfoCollection<PSMemberInfo> GetMatchMembers()
+        {
+            if (!WildcardPattern.ContainsWildcardCharacters(_property))
+            {
+                PSMemberInfoInternalCollection<PSMemberInfo> results = new PSMemberInfoInternalCollection<PSMemberInfo>();
+                PSMemberInfo member = _inputObject.Members[_property];
+                if (member != null)
+                {
+                    results.Add(member);
+                }
+                return new ReadOnlyPSMemberInfoCollection<PSMemberInfo>(results);
+            }
+
+            ReadOnlyPSMemberInfoCollection<PSMemberInfo> members = _inputObject.Members.Match(_property, PSMemberTypes.All);
+            Dbg.Assert(members != null, "The return value of Members.Match should never be null.");
+            return members;
         }
     }
 
