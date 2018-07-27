@@ -1109,13 +1109,15 @@ namespace Microsoft.PowerShell.Commands
 
             if (_usingByteEncoding)
             {
-                try
+                if (content is byte[] byteArray)
                 {
-                    byte byteToWrite = (byte)content;
-
-                    _stream.WriteByte(byteToWrite);
+                    _stream.Write(byteArray, 0, byteArray.Length);
                 }
-                catch (InvalidCastException)
+                else if (content is byte b)
+                {
+                    _stream.WriteByte(b);
+                }
+                else
                 {
                     throw PSTraceSource.NewArgumentException("content", FileSystemProviderStrings.ByteEncodingError);
                 }
